@@ -1,0 +1,5 @@
+[package]
+
+name = "string_exact"
+version = "0.0.1"
+authors = ["nedp <nedpummeroy@gmail.com>"]
