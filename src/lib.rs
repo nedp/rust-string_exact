@@ -1,17 +1,15 @@
-struct Searcher<'s, C: 's> {
+pub struct KMPPattern<'s, C: 's> {
     pattern: &'s[C],
     borders: Option<Vec<usize>>,
-    bmhTable: Option<Vec<usize>>,
 }
 
-impl<'s, C> Searcher<'s, C>
+impl<'s, C> KMPPattern<'s, C>
     where C: PartialEq {
-        
-    pub fn new<'t: 's>(pattern: &'t[C]) -> Searcher<'s, C> {
-        return Searcher{
+    
+    pub fn new(pattern: &'s[C]) -> KMPPattern<'s, C> {
+        return KMPPattern{
             pattern: pattern,
             borders: None,
-            bmhTable: None,
         };
     }
     
@@ -19,25 +17,63 @@ impl<'s, C> Searcher<'s, C>
         linear_search(self.pattern, text)
     }
     
-    pub fn kmp<'t: 's>(&'s mut self, text: &'t[C]) -> Option<usize> {
+    pub fn kmp(&mut self, text: &[C]) -> Option<usize>
+        where C: PartialEq {
+        
         // Generate the prefix table using the pattern.
         let borders: &[usize] = match self.borders {
             None => {
                 self.borders = Some(border_table(self.pattern));
-                self.borders.as_ref().unwrap().as_slice()
+                &self.borders.as_ref().unwrap()[..]
             },
-            Some(ref b) => b.as_slice()
+            Some(ref b) => &b[..]
         };
       
         // Search the text using the pattern and prefix table.
         kmp_search(self.pattern, text, borders)
     }
+}
+
+pub struct BMHPattern<'s> {
+    u8_kmp: KMPPattern<'s, u8>,
     
-    pub fn bmh(&mut self, text: &[C]) -> Option<usize> {
-        // Generate the shift table using the pattern.
-        
-        // Search the text using the pattern and shift table.
-        None
+    pattern: &'s str,
+    bad_char_table: Option<Vec<usize>>,
+}
+
+impl<'s> BMHPattern<'s> {
+    pub fn new<'p: 's>(pattern: &'p str) -> BMHPattern<'s> {
+        BMHPattern{
+            u8_kmp: KMPPattern{
+                pattern: pattern.as_bytes(),
+                borders: None,
+            },
+            
+            pattern: pattern,
+            bad_char_table: None,
+        }
+    }
+    
+    pub fn linear(&self, text: &str) -> Option<usize> {
+        self.u8_kmp.linear(text.as_bytes())
+    }
+    
+    pub fn kmp(&mut self, text: &str) -> Option<usize> {
+        self.u8_kmp.kmp(text.as_bytes())
+    }
+    
+    pub fn bmh(&mut self, text: &str) -> Option<usize> {
+        // Generate the bad character table using the pattern.
+        let bad_char_table: &[usize] = match self.bad_char_table {
+            None => {
+                self.bad_char_table = Some(bad_character_table(self.pattern));
+                &self.bad_char_table.as_ref().unwrap()[..]
+            },
+            Some(ref b) => &b[..]
+        };
+      
+        // Search the text using the pattern and bad character table.
+        bmh_search(self.pattern, text, bad_char_table)
     }
 }
 
@@ -48,7 +84,6 @@ pub fn linear_search<C>(pattern: &[C], text: &[C]) -> Option<usize>
     'text:
     for i_text in 0..text.len() {
         // For each character in the pattern:
-        let mut i_pattern = 0;
         for i_pattern in 0..pattern.len() {
             // If there is a mismatch, try the next position.
             if text[i_text + i_pattern] != pattern[i_pattern] {
@@ -88,7 +123,6 @@ pub fn border_table<C>(pattern: &[C]) -> Vec<usize>
         while pattern[b] != *c && b != 0 {
             b = borders[b]
         }
-       
         // If an extensible border was found, extend it,
         // otherwise this prefix has no border.
         if pattern[b] == *c {
@@ -104,10 +138,10 @@ pub fn border_table<C>(pattern: &[C]) -> Vec<usize>
 
 pub fn kmp_search<C>(pattern: &[C], text: &[C], borders: &[usize]) -> Option<usize>
     where C: PartialEq {
-        
-    // For each starting point in the text:
     let mut t = 0;
     let mut p = 0;
+    // While we haven't reached the last possible starting point
+    // for the pattern in the text.
     while t+p < text.len() {
         // If there is a match, move forward in the pattern.
         if text[t+p] == pattern[p] {
@@ -135,11 +169,60 @@ pub fn kmp_search<C>(pattern: &[C], text: &[C], borders: &[usize]) -> Option<usi
     return None
 }
 
-#[cfg(test)]
-mod correct_index_test {
-    use super::Searcher;
+pub fn bad_character_table(pattern: &str) -> Vec<usize> {
+    // If the character doesn't appear in the pattern,
+    // then we can skip ahead by the length of the whole
+    // pattern if the character appears in the text.
+    let mut bad_char_table =
+        (0..std::u8::MAX).map(|_| -> usize { pattern.len() })
+                         .collect::<Vec<_>>();
+   
+    // Otherwise we should skip ahead by the distance between the
+    // end of the pattern and the last occurence of that character.
+    for (i, c) in pattern.bytes().enumerate() {
+        bad_char_table[c as usize] = pattern.len() - 1 - i;
+    }
     
-    const CASES: [(Option<usize>, &'static str); 7] = [
+    bad_char_table
+}
+
+pub fn bmh_search(pattern: &str, text: &str, bad_char_table: &[usize]) -> Option<usize> {
+    if pattern.len() == 0 {
+        return None;
+    }
+    let text = text.as_bytes();
+    let pattern = pattern.as_bytes();
+    
+    let mut t = 0;
+    // While there's enough room in the text for the pattern:
+    while t + pattern.len() <= text.len() {
+        // Starting at the end of the pattern,
+        // while the pattern matches the text,
+        // move back.
+        let mut p = pattern.len() - 1;
+        while text[t+p] == pattern[p] {
+            // If we reached the start of the pattern, return 
+            // the pattern's start position in the text.
+            if p == 0 {
+                return Some(t)    
+            }
+            p -= 1;
+        }
+        // There was a mismatch.
+        // Shift forwards in the text so that the character
+        // in the text lines up with the last occurence
+        // of that character in the in the pattern.
+        t += bad_char_table[text[t+p] as usize];
+    }
+    None
+}
+
+#[cfg(test)]
+mod correct_return {
+    use super::KMPPattern;
+    pub use super::BMHPattern;
+    
+    pub const CASES: [(Option<usize>, &'static str); 7] = [
         (Some(0),  "the"),
         (Some(0),  "the dog is"),
         (Some(1),  "he "),
@@ -148,35 +231,56 @@ mod correct_index_test {
         (Some(21), "then"),
         (None,     "frank"),
     ];
-    const TEXT: &'static str = "the dog is very dead then";
+    pub const TEXT: &'static str = "the dog is very dead then";
     
     #[test]
-    fn linear_correct_index() {
+    fn linear() {
         let text = TEXT.chars().collect::<Vec<_>>();
         for &(want, pattern) in (&CASES).iter() {
             let chars = pattern.chars().collect::<Vec<_>>();
-            let searcher = Searcher::new(chars.as_slice());
-            assert_eq!(searcher.linear(text.as_slice()), want);
+            let searcher = KMPPattern::new(&chars[..]);
+            assert_eq!(searcher.linear(&text[..]), want);
         }
     }
 
     #[test]
-    fn kmp_correct_index() {
+    fn kmp() {
         let text = TEXT.chars().collect::<Vec<_>>();
         for &(want, pattern) in CASES.iter() {
             let chars = pattern.chars().collect::<Vec<_>>();
-            let mut searcher = Searcher::new(chars.as_slice());
-            assert_eq!(searcher.kmp(text.as_slice()), want);
+            let mut searcher = KMPPattern::new(&chars[..]);
+            assert_eq!(searcher.kmp(&text[..]), want);
         }
     }
+   
+    #[cfg(test)]
+    mod bmh_pattern {
+        use super::BMHPattern;
+        use super::CASES;
+        use super::TEXT;
+        
+        #[test]
+        fn linear() {
+            for &(want, pattern) in (&CASES).iter() {
+                let searcher = BMHPattern::new(pattern);
+                assert_eq!(searcher.linear(TEXT), want);
+            }
+        }
 
-    #[test]
-    fn bmh_correct_index() {
-        let text = TEXT.chars().collect::<Vec<_>>();
-        for &(want, pattern) in CASES.iter() {
-            let chars = pattern.chars().collect::<Vec<_>>();
-            let mut searcher = Searcher::new(chars.as_slice());
-            assert_eq!(searcher.bmh(text.as_slice()), want);
+        #[test]
+        fn kmp() {
+            for &(want, pattern) in CASES.iter() {
+                let mut searcher = BMHPattern::new(pattern);
+                assert_eq!(searcher.kmp(TEXT), want);
+            }
+        }
+
+        #[test]
+        fn bmh() {
+            for &(want, pattern) in CASES.iter() {
+                let mut searcher = BMHPattern::new(pattern);
+                assert_eq!(searcher.bmh(TEXT), want);
+            }
         }
     }
 }
